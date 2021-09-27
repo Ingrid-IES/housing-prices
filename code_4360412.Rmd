@@ -1,0 +1,506 @@
+---
+title: "code_4360412"
+author: "Ingrid Shu"
+date: "4/20/2021"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, cache = TRUE)
+```
+
+```{r warning = FALSE, message = FALSE}
+library(tidyverse)
+library(readr)
+library(corrplot)
+library(caret)
+```
+
+Load the training set and test set. 
+```{r warning = FALSE, message = FALSE}
+train <- read_csv("Train&Test_FINAL_PROJECT/train.csv") %>%
+  mutate(desc = factor(desc),
+         exteriorfinish = factor(exteriorfinish),
+         rooftype = factor(rooftype),
+         state = factor(state))
+
+
+actual_test <- read_csv("Train&Test_FINAL_PROJECT/test.csv") %>%
+  mutate(desc = factor(desc),
+         exteriorfinish = factor(exteriorfinish),
+         rooftype = factor(rooftype),
+         state = factor(state))
+
+```
+
+Let's examine missing values. 
+``` {r}
+sum_NA <- function(var){
+  sum_NA <- sum(is.na(var))
+  return(sum_NA)
+}
+ 
+table(is.na(train)) # 687 N/A in total 
+sum_NA(train$fireplaces) # has all 687 N/A
+
+train <- train %>%
+  dplyr::select(-c(fireplaces))
+
+actual_test <- actual_test %>%
+  dplyr::select(-c(fireplaces))
+```
+We will omit fireplaces from our study as it has 687 missing values. 
+
+We will also omit zipcode as AvgIncome already records the average household income within the zipcode. Additionally, zipcode can be difficult to interpret. 
+```{r}
+train <- train %>%
+  dplyr::select(-c(zipcode))
+
+actual_test <- actual_test %>%
+  dplyr::select(-c(zipcode))
+```
+
+
+We can change yearbuilt to be a categorical variable. 
+```{r}
+summary(train$yearbuilt)
+
+train <- train %>%
+  mutate(yearbuilt = ifelse(yearbuilt <= 1940, "old", "new")) %>% 
+  mutate(yearbuilt = factor(yearbuilt))
+
+actual_test <- actual_test %>%
+  mutate(yearbuilt = ifelse(yearbuilt <= 1940, "old", "new")) %>% 
+  mutate(yearbuilt = factor(yearbuilt))
+```
+
+Does our data have any extreme outliers for housing price?
+```{r}
+ggplot(train, aes(price)) + 
+  geom_histogram(color = "black", fill = "white", bins = 50)
+```
+
+The price histogram is severely right skewed. Let's examine if there are more outliers for VA or PA. 
+
+```{r}
+VA_train <- train %>% 
+  filter(state == "VA")
+
+PA_train <- train %>%
+  filter(state == "PA")
+
+ggplot(train, aes(x = state, y = price))+
+  geom_boxplot()+
+  coord_flip()+
+  scale_y_continuous(breaks = seq(3e4, 4e6, length.out = 10))+
+  theme(axis.text.x = element_text(angle = 45))
+
+summary(VA_train$price)
+summary(PA_train$price)
+```
+VA has a slightly higher median price, but both states have their share of ridiculously high housing price outliers. 
+
+
+Let's examine correlations between the continuous variables. 
+```{r}
+cont_train <- train[-c(1, 3, 5, 6, 7,14)]  # train with only continuous predictors
+A <- cor(cont_train)
+
+corrplot::corrplot(A, method = "square", type = "lower")
+```
+As expected, there is moderately strong positive correlation between totalrooms, bedrooms, bathrooms, and sqft. These variables are also positively correlated with price. 
+
+
+Let's single out totalrooms, bedrooms, bathrooms, and sqft and observe their correlations for possible collinearity.
+```{r}
+rooms_train <- cont_train[,c(1, 4:7)]    
+C <- cor(rooms_train)
+
+corrplot::corrplot(C, method = "number", type = "lower")
+```
+
+
+```{r}
+g1 <- ggplot(train, aes(x = exteriorfinish, y = price)) + 
+  geom_boxplot()
+
+g2 <- ggplot(train, aes(x = rooftype, y = price)) + 
+  geom_boxplot()
+
+g3 <- ggplot(train, aes(x = desc, y = price)) + 
+  geom_boxplot()
+
+
+gridExtra::grid.arrange(g1, g2, g3, nrow = 3)
+
+
+train %>% filter(desc == "MOBILE HOME") %>% nrow()
+train %>% filter(desc == "CONDOMINIUM")%>% nrow()
+train %>% filter(desc == "ROWHOUSE")%>% nrow()
+train %>% filter(desc == "MULTI-FAMILY")%>% nrow()
+train %>% filter(desc == "SINGLE FAMILY")%>% nrow()
+
+1272/1400
+
+```
+90.9% of the observations are single-family houses. 
+
+
+
+## Divide train into a training and testing set. Also, let us identify these outlier observations and create a different version of train with no outliers.
+```{r}
+set.seed(126)
+train1 <- sample_frac(train, 0.7)
+test1 <- setdiff(train, train1)
+
+
+# and a split for the sets with no outliers
+
+outliers <- boxplot.stats(train$price)$out
+out_index <- which(train$price %in% c(outliers))
+
+train_no_out <- train[-c(out_index),]
+
+set.seed(3)
+train1_NO <- sample_frac(train_no_out, 0.7)
+test1_NO <- setdiff(train_no_out, train1_NO)
+```
+
+
+## Multiple Regression
+```{r}
+fit0 <- lm(price~.-id, data = train1)
+summary(fit0)
+```
+From multiple regression including all predictors, we see that significant predictors include desc, numstories, yearbuilt, exteriorfinish, rooftype, basement, bedrooms, bathrooms, sqft, lotarea, state, and AvgIncome. 
+
+Let's fit a multiple regression with only these.
+
+```{r}
+fit00 <- lm(price ~ + numstories + yearbuilt + exteriorfinish + rooftype + basement + bedrooms + bathrooms + sqft + lotarea + state + AvgIncome, data = train1)
+
+summary(fit00)
+
+pred00 <- predict(fit00, newdata = test1)
+(mse_00 <- mean((pred00 - test1$price)^2))
+```
+14.3 billion test MSE for multiple regression.  
+
+## Best Subset Selection
+```{r}
+library(leaps)
+bestSubset_fit <- regsubsets(price ~., data = train1[,-1], nvmax = 21)
+
+train_matrix <- model.matrix(price ~., data = train1[,-1], nvmax = 21)
+
+train_val_errors <- rep(0, 21)
+for(i in 1:21){
+  coefi <- coef(bestSubset_fit, id = i)
+  pred <- train_matrix[, names(coefi)] %*% coefi
+  train_val_errors[i] <- mean( (pred - train1$price)^2 )
+}
+
+train_val_errors <-  data.frame(train_val_errors)
+
+ggplot(train_val_errors, aes(x = c(1:21), y = train_val_errors))+
+  geom_point(color = "maroon", size = 2)+
+  geom_line(alpha = 0.5)+
+  labs(title = "Best Subset Selection: Train MSE", x = "Subset Size", y = "Training MSE")
+```
+
+```{r}
+test_matrix <- model.matrix(price ~., data = test1[,-1], nvmax = 21)
+
+test_val_errors <- rep(0, 21)
+for (i in 1:21){
+  coefi <- coef(bestSubset_fit, id = i)
+  pred <- test_matrix[, names(coefi)] %*% coefi
+  test_val_errors[i] <- mean( (pred - test1$price)^2 )
+}
+
+test_val_errors <- data.frame(test_val_errors)
+
+ggplot(test_val_errors, aes(x = c(1:21), y = test_val_errors))+
+  geom_point(color = "royal blue", size = 2)+
+  geom_line(alpha = 0.5)+
+  labs(title = "Best Subset Selection: Test MSE", x = "Subset Size", y = "Test MSE")
+
+```
+```{r}
+which.min(test_val_errors$test_val_errors)
+```
+```{r}
+coef(bestSubset_fit, id = 21)
+```
+```{r}
+test_val_errors[21,]
+```
+14.1 billion test MSE.
+Best subset selection did not narrow down the predictors at all.
+
+
+## Ridge Regression
+```{r warning = FALSE, message = FALSE}
+library(glmnet)
+
+train_matrix <- model.matrix(price ~., data = train1[,-1])
+test_matrix <- model.matrix(price~., data = test1[,-1])
+grid <- 10^seq(10, -2, length = 100)
+
+set.seed(51)
+
+ridge <- glmnet(x = train_matrix, y = train1$price, alpha = 0, lambda = grid)
+
+cv_ridge <- cv.glmnet(x = train_matrix, y = train1$price, alpha = 0, lambda = grid, nfolds = 10, thresh=1e-12)
+
+best_lambda_ridge <- cv_ridge$lambda.min
+
+ridge_pred <- predict(ridge, s = best_lambda_ridge, newx = test_matrix)
+
+(mseRR <- mean( (ridge_pred - test1$price)^2 ))
+
+```
+13.5 billion test MSE for ridge regression.
+
+
+## Lasso
+```{r warning = FALSE}
+set.seed(4)
+
+lasso <- glmnet(x = train_matrix, y = train1$price, alpha = 1, lambda = grid)
+
+cv_lasso <- cv.glmnet(x = train_matrix,  y = train1$price, alpha = 1, lambda = grid, nfolds = 10, thresh = 1e-12)
+
+best_lambda_lasso <- cv_lasso$lambda.min
+
+lasso_pred <- predict(lasso, s = best_lambda_lasso, newx = test_matrix)
+
+(lasso_mse <- mean( (lasso_pred - test1$price)^2))
+
+predict(lasso, s = best_lambda_lasso, type = "coefficients")
+```
+13.5 billion test MSE for lasso.
+
+## PCA
+```{r warning = F, message = F}
+set.seed(8)
+library(pls)
+pcr_fit <- pcr(price ~ state + basement + bedrooms + bathrooms + sqft + lotarea + AvgIncome, data = train1, scale = TRUE, validation = "CV")
+summary(pcr_fit)
+validationplot(pcr_fit, val.type = "MSEP")
+
+
+pcr_pred <- predict(pcr_fit, newdata = test1, ncomp = 5)
+(pcr_mse <- mean (( pcr_pred - test1$price)^2 ))
+```
+15.4 billion test MSE for PCA.
+
+## PLS
+```{r}
+set.seed(24)
+pls_fit <- plsr(price ~ state + basement + bedrooms + bathrooms + sqft + lotarea + AvgIncome, data = train1, scale = TRUE, validation = "CV")
+summary(pls_fit)
+validationplot(pls_fit, val.type = "MSEP")
+
+pls_pred <- predict(pls_fit, newdata= test1[,-1], ncomp = 5)
+(pls_mse <- mean( (pls_pred - test1$price)^2 ))
+```
+15.4 billion test MSE for PLS.
+
+
+## Regression Tree
+```{r warning = FALSE, message = FALSE}
+library(tree)
+library(randomForest)
+tree0 <- tree(price ~.-id, data = train1)
+summary(tree0)
+
+plot(tree0)
+text(tree0, pretty = 0)
+
+pred <- predict(tree0, newdata = test1)
+
+mse_tree <- mean((pred - test1$price)^2 )
+mse_tree
+```
+24.0 billion test MSE for a regression tree.
+
+## Pruned regression tree
+```{r}
+set.seed(15)
+cv_tree0 <- cv.tree(tree0)
+plot(cv_tree0)
+```
+Cross-validation has selected a tree of size 10.
+
+```{r}
+prune_tree0 <- prune.tree(tree0, best = 10)
+plot(prune_tree0)
+text(prune_tree0, pretty = 0)
+
+prune_pred <- predict(prune_tree0, newdata = test1)
+mse_prune <- mean((prune_pred - test1$price)^2)
+mse_prune
+```
+22.0 billion test MSE for a pruned regression tree. Pruning the tree did improve the test MSE.
+
+## Bagging
+```{r}
+set.seed(1)
+bag_tree0 <- randomForest(price ~.-id, data = train1, mtry = 13, ntree = 500, importance = TRUE)
+bag_pred <- predict(bag_tree0, newdata = test1)
+mse_bagg <- mean((bag_pred - test1$price)^2)
+mse_bagg
+
+
+importance(bag_tree0)
+varImpPlot(bag_tree0)
+```
+8.2 billion test MSE for bagging.
+
+## Boosting
+```{r}
+library(gbm)
+set.seed(2)
+
+powers <- seq(-10, -0.2, by = 0.1)
+lambdas <-  10^powers
+length_lambdas <- length(lambdas)
+
+train_errors <- rep(0, length_lambdas)
+test_errors <- rep(0, length_lambdas)
+
+for(i in 1:length_lambdas){
+  boost = gbm(price ~.-id, data = train1, distribution = "gaussian", n.trees = 1000, shrinkage = lambdas[i])
+  train_pred = predict(boost, newdata = train1, n.trees = 1000)
+  test_pred = predict(boost, newdata = test1, n.trees = 1000)
+  train_errors[i] = mean((train_pred - train1$price)^2)
+  test_errors[i] = mean((test_pred - test1$price)^2)
+}
+
+
+par(mfrow = c(2,2))
+plot(lambdas, train_errors, type = "b", xlab = "Shrinkage (lambda)", ylab = "Train MSE", col = "purple", pch = 20)
+plot(lambdas, test_errors, type = "b", xlab = "Shrinkage (lambda)", ylab = "Test MSE", col = "green", pch = 20)
+
+lambdas[which.min(test_errors)]
+
+boost_mse <- min(test_errors)
+boost_mse
+```
+
+14.4 billion test MSE (minimum test MSE) for boosting when lambda = 0.04.
+
+
+## RandomForests
+```{r}
+set.seed(0)
+rf_tree0 <- randomForest(price ~.-id, data = train1, mtry = 4, ntree = 500, importance = TRUE)
+rf_pred <- predict(rf_tree0, newdata = test1)
+
+mse_rf <- mean((rf_pred - test1$price)^2)
+mse_rf
+
+importance(rf_tree0)
+varImpPlot(rf_tree0)
+```
+6.2 billion test MSE for random forest with mtry = 4.
+
+```{r}
+testError <- rep(0, 13)
+for(i in 1:13){
+  set.seed(0)
+  rf <- randomForest(price ~.-id, data = train1, mtry = i, ntree = 500, importance = TRUE)
+  pred <- predict(rf, newdata = test1)
+  testError[i] <- mean((pred - test1$price)^2)
+}
+
+df <- data.frame(
+  "mtry" = c(1:13),
+  "Test Error" = testError
+)
+
+ggplot(df, aes(mtry, Test.Error)) + 
+  geom_point() +
+  geom_line()
+```
+
+```{r}
+which.min(df$Test.Error)
+```
+The random forest that we tried (mtry = 4) is already the one with the lowest test MSE for random forests. 
+
+
+
+
+```{r}
+mse_df <- data.frame(
+  "Method" = c("Multiple Regression",
+               "Best Subset",
+               "Ridge Regression",
+               "Lasso",
+               "PCA",
+               "PLS",
+               "Regression Tree",
+               "Pruned Regression Tree",
+               "Bagging",
+               "Boosting",
+               "Random Forest"
+               ),
+  "Test_MSE" = c(mse_00, test_val_errors[21,], mseRR, lasso_mse, pcr_mse, pls_mse, mse_tree, mse_prune, mse_bagg, boost_mse, mse_rf)
+)
+
+mse_df
+
+ggplot(mse_df, aes(x = reorder(Method, Test_MSE), y = Test_MSE)) + 
+  geom_col(aes(fill = Test_MSE), color = "black")+
+  theme(axis.text.x = element_text(angle = 45))+ 
+  theme(legend.position = "none") + 
+  labs(x = "Model Method", "Test MSE")
+
+
+
+```
+
+```{r}
+rf_no_out <- randomForest(price ~.-id, data = train1_NO, mtry = 4, ntree = 500, importance = TRUE)
+rf_no_out_pred <- predict(rf_no_out, newdata = test1_NO)
+
+mean((rf_no_out_pred - test1_NO$price)^2)
+```
+When using data with no outliers, the test MSE for random forest with mtry = 4 is 4.0 billion.
+
+
+## Predicting on test dataset
+```{r}
+actual_test$price <- predict(rf_tree0, newdata = actual_test[,-2])
+actual_test$student_id <- rep(4360412, 600)
+
+
+testing_predictions_4360412 <- actual_test %>% 
+  select(id, price, student_id)
+
+write.csv(testing_predictions_4360412, 'testing_predictions_4360412.csv')
+```
+
+
+## Baseline comparison
+```{r}
+avgPrice <- mean(train1$price)
+baseMSE <-  mean((avgPrice - test1$price)^2)
+baseMSE
+```
+93.8 billion test MSE for baseline.
+Our lowest test MSE of 6.2 billion from random forest with mtry = 4 is indeed an improvement from the naive model. 
+
+
+
+```{r}
+fullTrainPred <- predict(rf_tree0, train)
+
+mean((fullTrainPred - train$price)^2)
+```
+4.4 billion test MSE
+
+
+
